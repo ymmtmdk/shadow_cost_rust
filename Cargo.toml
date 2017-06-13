@@ -1,0 +1,8 @@
+[package]
+name = "shadow_cost_rust"
+version = "0.1.0"
+authors = ["ymmtmdk <ymmtmdk@gmail.com>"]
+
+[build-dependencies]
+libc = "0.2"
+
