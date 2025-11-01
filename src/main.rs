@@ -32,6 +32,29 @@ fn main() {
     let loop_count: u32 = argv.next().unwrap_or("100".to_string()).parse().unwrap();
     let trial_count: u32 = argv.next().unwrap_or("100".to_string()).parse().unwrap();
 
+    // ヘッダー表示
+    print_header();
+    
+    // 実行時間測定開始
+    let start_time = std::time::Instant::now();
+    
     // シミュレーション実行
     shadow_cost::CostSim::new(deck_size, turn_max).search_deck(loop_count, trial_count);
+    
+    // 実行時間表示
+    let elapsed = start_time.elapsed();
+    println!("\n=== EXECUTION COMPLETED ===");
+    println!("Total execution time: {:.2}s", elapsed.as_secs_f64());
+    println!("Thank you for using Shadowverse Deck Cost Optimizer!");
+}
+
+/// プログラム開始時のヘッダーを表示
+fn print_header() {
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║              Shadowverse Deck Cost Optimizer                ║");
+    println!("║                                                              ║");
+    println!("║  This tool optimizes deck composition and initial hand      ║");
+    println!("║  distribution to minimize wasted mana costs in games.       ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
 }

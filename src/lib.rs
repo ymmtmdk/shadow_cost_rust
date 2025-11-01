@@ -635,7 +635,13 @@ pub mod shadow_cost{
         /// * `loop_count` - 最適化の世代数
         /// * `trial_count` - 各候補の評価試行回数
         pub fn search_deck(&self, loop_count: u32, trial_count: u32){
-            println!("search_deck");
+            println!("=== DECK OPTIMIZATION ===");
+            println!("Parameters:");
+            println!("  Deck Size: {} cards", self.deck_size);
+            println!("  Max Turns: {}", self.turn_max);
+            println!("  Generations: {}", loop_count);
+            println!("  Trials per candidate: {}", trial_count);
+            println!();
 
             // ランダムな初期デッキを生成
             let mut deck = Cards::new();
@@ -649,15 +655,24 @@ pub mod shadow_cost{
             cache.deck_trial(&Rc::new(Trial::new(hd, dk)), trial_count);
             
             // 指定世代数だけ最適化を繰り返し
-            for _ in 0..loop_count{
+            for generation in 0..loop_count{
                 for trial in cache.top_group(TOP_GROUP_SIZE){
                     cache.deck_trial(&trial, trial_count);
                 }
+                
+                // 進捗表示（10世代ごと）
+                if (generation + 1) % 10 == 0 || generation == 0 {
+                    let best = &cache.top_group(1)[0];
+                    println!("Generation {}: Best score = {:.3}", generation + 1, best.score());
+                }
             }
             
-            // 最優秀デッキを表示し、手札最適化に進む
-            println!("{:?}", cache.top_group(1)[0]);
-            self.search_hand(cache.top_group(1)[0].deck().clone(), loop_count, trial_count);
+            let best_deck = &cache.top_group(1)[0];
+            println!();
+            println!("DECK OPTIMIZATION COMPLETED");
+            Self::print_deck_result(best_deck);
+            
+            self.search_hand(best_deck.deck().clone(), loop_count, trial_count);
         }
 
         /// 手札・デッキ分割の最適化を実行
@@ -670,7 +685,9 @@ pub mod shadow_cost{
         /// * `loop_count` - 最適化の世代数
         /// * `trial_count` - 各候補の評価試行回数
         pub fn search_hand(&self, deck: Rc<Cards>, loop_count: u32, trial_count: u32){
-            println!("search_hand");
+            println!("\n=== HAND OPTIMIZATION ===");
+            println!("Optimizing initial hand distribution...");
+            println!();
 
             let mut cache = TrialCache::new(self.turn_max);
 
@@ -681,14 +698,141 @@ pub mod shadow_cost{
             cache.hand_trial(&Rc::new(Trial::new(hd, dk)), trial_count);
             
             // 指定世代数だけ最適化を繰り返し
-            for _ in 0..loop_count{
+            for generation in 0..loop_count{
                 for trial in cache.top_group(TOP_GROUP_SIZE){
                     cache.hand_trial(&trial, trial_count);
                 }
+                
+                // 進捗表示（20世代ごと）
+                if (generation + 1) % 20 == 0 || generation == 0 {
+                    let best = &cache.top_group(1)[0];
+                    println!("Generation {}: Best score = {:.3}", generation + 1, best.score());
+                }
             }
             
-            // 最終結果を表示
-            println!("{:?}", cache.top_group(1)[0]);
+            let best_result = &cache.top_group(1)[0];
+            println!();
+            println!("HAND OPTIMIZATION COMPLETED");
+            Self::print_final_result(best_result);
+        }
+
+        /// デッキ最適化結果を表示
+        /// 
+        /// # Arguments
+        /// * `trial` - 表示する試行結果
+        fn print_deck_result(trial: &Trial) {
+            println!("Optimal Deck Configuration:");
+            println!("  Average waste cost per game: {:.3}", trial.score());
+            println!("  Total trials: {}", trial.deck().size() + trial.hand().size());
+            println!();
+            
+            Self::print_card_distribution("Deck", &trial.deck());
+        }
+
+        /// 最終結果を表示
+        /// 
+        /// # Arguments
+        /// * `trial` - 表示する試行結果
+        fn print_final_result(trial: &Trial) {
+            println!("=== OPTIMIZATION RESULTS ===");
+            println!();
+            println!("Final Score: {:.3} average waste cost per game", trial.score());
+            println!("Total cards: {} (Hand: {}, Deck: {})", 
+                     trial.hand().size() + trial.deck().size(),
+                     trial.hand().size(),
+                     trial.deck().size());
+            println!();
+            
+            Self::print_card_distribution("Initial Hand", &trial.hand());
+            println!();
+            Self::print_card_distribution("Remaining Deck", &trial.deck());
+            
+            println!();
+            println!("=== SUMMARY ===");
+            println!("Lower scores indicate better cost efficiency.");
+            println!("This configuration wastes an average of {:.3} mana per game.", trial.score());
+            
+            // 統計情報の表示
+            Self::print_statistics(trial);
+        }
+
+        /// 統計情報を表示
+        /// 
+        /// # Arguments
+        /// * `trial` - 統計を表示する試行結果
+        fn print_statistics(trial: &Trial) {
+            let avg_cost = Self::calculate_average_cost(&trial.hand(), &trial.deck());
+            let hand_avg_cost = Self::calculate_average_cost(&trial.hand(), &Cards::new());
+            let deck_avg_cost = Self::calculate_average_cost(&Cards::new(), &trial.deck());
+            
+            println!();
+            println!("=== STATISTICS ===");
+            println!("Average card cost:");
+            println!("  Overall: {:.2}", avg_cost);
+            println!("  Initial hand: {:.2}", hand_avg_cost);
+            println!("  Remaining deck: {:.2}", deck_avg_cost);
+            
+            let mana_efficiency = (1.0 - (trial.score() / 10.0)) * 100.0;
+            println!("Mana efficiency: {:.1}%", mana_efficiency.max(0.0));
+        }
+
+        /// 平均コストを計算
+        /// 
+        /// # Arguments
+        /// * `hand` - 手札
+        /// * `deck` - デッキ
+        /// 
+        /// # Returns
+        /// 加重平均コスト
+        fn calculate_average_cost(hand: &Cards, deck: &Cards) -> f64 {
+            let mut total_cost = 0u32;
+            let mut total_cards = 0u32;
+            
+            for cost in 1..=COST_MAX {
+                let hand_count = if hand.size() > 0 { hand.nums[(cost-1) as usize] } else { 0 };
+                let deck_count = if deck.size() > 0 { deck.nums[(cost-1) as usize] } else { 0 };
+                let count = hand_count + deck_count;
+                
+                total_cost += cost * count;
+                total_cards += count;
+            }
+            
+            if total_cards > 0 {
+                total_cost as f64 / total_cards as f64
+            } else {
+                0.0
+            }
+        }
+
+        /// カード分布を表形式で表示
+        /// 
+        /// # Arguments
+        /// * `title` - セクションのタイトル
+        /// * `cards` - 表示するカード構成
+        fn print_card_distribution(title: &str, cards: &Cards) {
+            println!("{}:", title);
+            println!("  Cost:  1  2  3  4  5  6  7  8  9 10");
+            print!("  Cards: ");
+            
+            for i in 0..COST_MAX {
+                let count = cards.nums[i as usize];
+                print!("{:2} ", count);
+            }
+            println!();
+            
+            // コストカーブの視覚的表示
+            println!("  Curve: ");
+            for i in 0..COST_MAX {
+                let count = cards.nums[i as usize];
+                print!("  {:2}: ", i + 1);
+                for _ in 0..count {
+                    print!("█");
+                }
+                if count > 0 {
+                    print!(" ({})", count);
+                }
+                println!();
+            }
         }
     }
 }
