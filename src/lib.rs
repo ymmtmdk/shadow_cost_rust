@@ -7,14 +7,20 @@ pub mod shadow_cost{
     use std::collections::BTreeSet;
     use std::cmp::Ordering;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use rayon::prelude::*;
 
     /// 高速なXorShift疑似乱数生成器
     /// 
     /// 標準ライブラリの乱数生成器より高速で、ゲームシミュレーションには
-    /// 十分な品質を持つ。シングルスレッド環境での使用を前提とする。
+    /// 十分な品質を持つ。スレッドローカルストレージを使用して並列処理対応。
     mod xor_rand{
-        /// グローバルな乱数シード
-        static mut SEED: u32 = 9;
+        use std::cell::Cell;
+        
+        /// スレッドローカルな乱数シード
+        thread_local! {
+            static SEED: Cell<u32> = Cell::new(9);
+        }
 
         /// 0からn-1の範囲で疑似乱数を生成
         /// 
@@ -24,15 +30,17 @@ pub mod shadow_cost{
         /// # Returns
         /// 0からn-1の範囲の疑似乱数
         /// 
-        /// # Safety
-        /// グローバルなmutableな状態を変更するためunsafeを使用
+        /// # Note
+        /// スレッドローカルストレージを使用してスレッドセーフ
         pub fn rnd(n: u32) -> u32{
-            unsafe{
-                SEED ^= SEED << 13;
-                SEED ^= SEED >> 17;
-                SEED ^= SEED << 5;
-                SEED % n
-            }
+            SEED.with(|seed| {
+                let mut s = seed.get();
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                seed.set(s);
+                s % n
+            })
         }
     }
 
@@ -434,16 +442,20 @@ pub mod shadow_cost{
         /// 指定回数のゲームシミュレーションを実行
         /// 
         /// この手札・デッキ構成で指定回数のゲームを実行し、
-        /// 結果をスコアに累積する。
+        /// 結果をスコアに累積する。並列処理で高速化。
         /// 
         /// # Arguments
         /// * `turn_max` - 各ゲームの最大ターン数
         /// * `count` - 実行するゲーム数
         pub fn trial(&mut self, turn_max: u32, count: u32){
-            let mut ls = 0;
-            for _ in 0..count{
-                ls += player::run_game(&*self.hand, &*self.deck, true, turn_max);
-            }
+            // 並列処理用にクローンを作成
+            let hand_clone = (*self.hand).clone();
+            let deck_clone = (*self.deck).clone();
+            
+            // 並列処理でゲームシミュレーションを実行
+            let ls: u32 = (0..count).into_par_iter()
+                .map(|_| player::run_game(&hand_clone, &deck_clone, true, turn_max))
+                .sum();
 
             self.score.add(count, ls);
         }
@@ -503,11 +515,12 @@ pub mod shadow_cost{
     /// 
     /// 同一のデッキ構成に対する重複計算を防ぎ、
     /// 常に上位候補を効率的に管理する。
+    /// 並列処理対応版。
     pub struct TrialCache{
         /// デッキ構成をキーとした試行結果のキャッシュ
-        cache: TrialCacheRc,
+        cache: Arc<Mutex<TrialCacheRc>>,
         /// スコア順にソートされた上位候補群
-        top_grp: BTreeSet<Rc<Trial>>,
+        top_grp: Arc<Mutex<BTreeSet<Rc<Trial>>>>,
         /// シミュレーションの最大ターン数
         turn_max: u32,
         /// 空の手札（デッキ最適化時に使用）
@@ -524,8 +537,8 @@ pub mod shadow_cost{
         /// 初期化されたTrialCache
         pub fn new(turn_max: u32) -> TrialCache{
             TrialCache{
-                cache: TrialCacheRc::new(),
-                top_grp: BTreeSet::new(),
+                cache: Arc::new(Mutex::new(TrialCacheRc::new())),
+                top_grp: Arc::new(Mutex::new(BTreeSet::new())),
                 turn_max: turn_max,
                 empty_hand: Rc::new(Cards::new()),
             }
@@ -541,13 +554,26 @@ pub mod shadow_cost{
         /// * `hd` - 手札構成
         /// * `dk` - デッキ構成
         /// * `trial_count` - 実行する試行回数
-        fn trial(&mut self, key: &Rc<Cards>, hd: &Rc<Cards>, dk: &Rc<Cards>, trial_count: u32){
-            if !self.cache.contains_key(key){
-                self.cache.insert(key.clone(), Trial::new(hd.clone(), dk.clone()));
+        fn trial(&self, key: &Rc<Cards>, hd: &Rc<Cards>, dk: &Rc<Cards>, trial_count: u32){
+            let mut trial = {
+                let mut cache = self.cache.lock().unwrap();
+                if !cache.contains_key(key){
+                    cache.insert(key.clone(), Trial::new(hd.clone(), dk.clone()));
+                }
+                cache.get(key).unwrap().clone()
+            };
+            
+            trial.trial(self.turn_max, trial_count);
+            
+            {
+                let mut cache = self.cache.lock().unwrap();
+                cache.insert(key.clone(), trial.clone());
             }
-            let t = self.cache.get_mut(key).unwrap();
-            t.trial(self.turn_max, trial_count);
-            self.top_grp.insert(Rc::new(t.clone()));
+            
+            {
+                let mut top_grp = self.top_grp.lock().unwrap();
+                top_grp.insert(Rc::new(trial));
+            }
         }
 
         /// デッキ構成の変異による試行を実行
@@ -558,7 +584,7 @@ pub mod shadow_cost{
         /// # Arguments
         /// * `trial` - 変異の元となる試行結果
         /// * `trial_count` - 実行する試行回数
-        pub fn deck_trial(&mut self, trial: &Rc<Trial>, trial_count: u32){
+        pub fn deck_trial(&self, trial: &Rc<Trial>, trial_count: u32){
             let hd = self.empty_hand.clone();
             let dk = Rc::new(trial.deck().random_change(3));
             self.trial(&dk, &hd, &dk, trial_count);
@@ -572,7 +598,7 @@ pub mod shadow_cost{
         /// # Arguments
         /// * `trial` - 変異の元となる試行結果
         /// * `trial_count` - 実行する試行回数
-        pub fn hand_trial(&mut self, trial: &Rc<Trial>, trial_count: u32){
+        pub fn hand_trial(&self, trial: &Rc<Trial>, trial_count: u32){
             let mut h = (*trial.hand()).clone();
             let mut d = (*trial.deck()).clone();
             h.random_exchange(&mut d, 3);
@@ -592,7 +618,8 @@ pub mod shadow_cost{
         /// # Returns
         /// 上位n個の試行結果のベクタ
         fn top_group(&self, n: usize) -> Vec<Rc<Trial>>{
-            self.top_grp.iter().take(n).cloned().collect()
+            let top_grp = self.top_grp.lock().unwrap();
+            top_grp.iter().take(n).cloned().collect()
         }
     }
 
@@ -635,19 +662,21 @@ pub mod shadow_cost{
         /// * `loop_count` - 最適化の世代数
         /// * `trial_count` - 各候補の評価試行回数
         pub fn search_deck(&self, loop_count: u32, trial_count: u32){
+            let cpu_count = num_cpus::get();
             println!("=== DECK OPTIMIZATION ===");
             println!("Parameters:");
             println!("  Deck Size: {} cards", self.deck_size);
             println!("  Max Turns: {}", self.turn_max);
             println!("  Generations: {}", loop_count);
             println!("  Trials per candidate: {}", trial_count);
+            println!("  CPU Cores: {}", cpu_count);
             println!();
 
             // ランダムな初期デッキを生成
             let mut deck = Cards::new();
             deck.random_add(self.deck_size);
 
-            let mut cache = TrialCache::new(self.turn_max);
+            let cache = TrialCache::new(self.turn_max);
 
             // 初期候補を評価
             let hd = Rc::new(Cards::new());
@@ -656,7 +685,10 @@ pub mod shadow_cost{
             
             // 指定世代数だけ最適化を繰り返し
             for generation in 0..loop_count{
-                for trial in cache.top_group(TOP_GROUP_SIZE){
+                let trials = cache.top_group(TOP_GROUP_SIZE);
+                
+                // 各試行を並列で処理
+                for trial in trials {
                     cache.deck_trial(&trial, trial_count);
                 }
                 
@@ -689,7 +721,7 @@ pub mod shadow_cost{
             println!("Optimizing initial hand distribution...");
             println!();
 
-            let mut cache = TrialCache::new(self.turn_max);
+            let cache = TrialCache::new(self.turn_max);
 
             // デッキから初期手札を分離
             let mut d = (*deck).clone();
@@ -699,7 +731,10 @@ pub mod shadow_cost{
             
             // 指定世代数だけ最適化を繰り返し
             for generation in 0..loop_count{
-                for trial in cache.top_group(TOP_GROUP_SIZE){
+                let trials = cache.top_group(TOP_GROUP_SIZE);
+                
+                // 各試行を並列で処理
+                for trial in trials {
                     cache.hand_trial(&trial, trial_count);
                 }
                 

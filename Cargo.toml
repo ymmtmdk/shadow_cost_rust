@@ -1,8 +1,12 @@
 [package]
 name = "shadow_cost_rust"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["ymmtmdk <ymmtmdk@gmail.com>"]
+
+[dependencies]
+rayon = "1.8"
+num_cpus = "1.16"
 
 [build-dependencies]
 libc = "0.2.1"
