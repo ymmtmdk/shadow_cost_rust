@@ -291,7 +291,7 @@ pub mod shadow_cost{
             if !self.cache.contains_key(key){
                 self.cache.insert(key.clone(), Trial::new(hd.clone(), dk.clone()));
             }
-            let mut t = self.cache.get_mut(key).unwrap();
+            let t = self.cache.get_mut(key).unwrap();
             t.trial(self.turn_max, trial_count);
             self.top_grp.insert(Rc::new(t.clone()));
         }
